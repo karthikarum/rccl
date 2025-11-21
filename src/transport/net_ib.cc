@@ -28,7 +28,7 @@
 
 #include "ibvwrap.h"
 #include "mlx5/mlx5dvwrap.h"
-#include "pollara/pollaradvwrap.h"
+#include "ainic400/ainic400dvwrap.h"
 #include "graph/xml.h"
 
 #define MAXSUFFIXSIZE 16
@@ -108,9 +108,11 @@ struct ncclIbMergedDev ncclIbMergedDevs[MAX_IB_VDEVS];
 struct ncclIbDev ncclIbDevs[MAX_IB_DEVS];
 pthread_mutex_t ncclIbLock = PTHREAD_MUTEX_INITIALIZER;
 static int ncclIbRelaxedOrderingEnabled = 0;
-static bool rcclPollaraNic = 0;
+static bool rcclAinic400 = 0;
 static bool rcclCtsInlineData = 0;
 static bool rcclCtsOffloadEnabled = 0;
+static bool ncclIbUseInline = 0;
+static int ncclIbGdrFlushDisable = 0;
 
 enum ncclIbChannelType {
   ncclIbChannelTypeCts  = 0,
@@ -150,12 +152,13 @@ NCCL_PARAM(IbFifoTc, "IB_FIFO_TC", -1);
 NCCL_PARAM(IbAsyncEvents,"IB_RETURN_ASYNC_EVENTS",1);
 NCCL_PARAM(IbEceEnable,"IB_ECE_ENABLE",1);
 NCCL_PARAM(IbDataDirect,"IB_DATA_DIRECT",1);
+NCCL_PARAM(IbGdrFlushDisable, "GDR_FLUSH_DISABLE", 0);
 
-// AMD Pollara AINIC
-RCCL_PARAM(CtsInlineData, "CTS_INLINE_DATA", 0);
-RCCL_PARAM(CtsOffloadEnabled, "CTS_OFFLOAD_ENABLED", 0);
+// AMD AINIC400
+RCCL_PARAM(CtsInlineData, "CTS_INLINE_DATA", -1);
+RCCL_PARAM(CtsOffloadEnabled, "CTS_OFFLOAD_ENABLED", -1);
 
-extern int64_t rcclParamPollaraNic();
+extern int64_t rcclParamAinic400();
 
 static ncclResult_t ncclIbStatsInit(struct ncclIbStats* stat) {
   __atomic_store_n(&stat->fatalErrorCount, 0, __ATOMIC_RELAXED);
@@ -642,8 +645,8 @@ ncclResult_t ncclIbInit(ncclDebugLogger_t logFunction, ncclProfilerCallback_t pr
   static int shownIbHcaEnv = 0;
   if(wrap_ibv_symbols() != ncclSuccess) { return ncclInternalError; }
   if(wrap_mlx5dv_symbols() != ncclSuccess) { INFO(NCCL_NET, "NET/IB : Failed to open mlx5dv symbols. Advance features like CX-8 Direct-NIC will be disabled."); }
-  if(wrap_pollaradv_symbols() != ncclSuccess) {
-    WARN("NET/IB : Failed to open pollaradv symbols. Advance features like Pollara-NIC UD load balancing will be disabled.");
+  if(wrap_ainic400dv_symbols() != ncclSuccess) {
+    WARN("NET/IB : Failed to open ainic400dv symbols. Advance features like AINIC UD load balancing will be disabled.");
     return ncclInternalError;
   }
 
@@ -799,9 +802,18 @@ ncclResult_t ncclIbInit(ncclDebugLogger_t logFunction, ncclProfilerCallback_t pr
     INFO(NCCL_INIT|NCCL_NET, "NET/IB : Using%s %s; OOB %s:%s", line, ncclIbRelaxedOrderingEnabled ? "[RO]" : "",
           ncclIbIfName, ncclSocketToString(&ncclIbIfAddr, addrline));
 
-    rcclPollaraNic = ((rcclParamPollaraNic() == 1) ? true : false);
-    rcclCtsInlineData = ((rcclParamCtsInlineData() == 1) ? true : false);
-    rcclCtsOffloadEnabled = ((rcclParamCtsOffloadEnabled() == 1) ? true : false);
+    ncclIbUseInline = ncclParamIbUseInline();
+    ncclIbGdrFlushDisable = ncclParamIbGdrFlushDisable();
+
+    rcclAinic400 = ((rcclParamAinic400() == 1) ? true : false);
+    if (rcclAinic400) {
+      rcclCtsInlineData = ((rcclParamCtsInlineData() == -1) ? true : false);
+      rcclCtsOffloadEnabled = ((rcclParamCtsOffloadEnabled() == -1) ? true : false);
+      // for AINIC400 to disable Inline data, set env NCCL_IB_USE_INLINE=-1
+      ncclIbUseInline = ((ncclParamIbUseInline() == -1) ? false : true);
+      // for AINIC400 GDR flush is disabled by default
+      ncclIbGdrFlushDisable = 1;
+    }
 
     pthread_mutex_unlock(&ncclIbLock);
   }
@@ -1312,7 +1324,7 @@ ncclResult_t ncclIbCreateQp(uint8_t ib_port, struct ncclIbNetCommDevBase* base,
   qpInitAttr.recv_cq = base->cq;
   qpInitAttr.qp_type = IBV_QPT_RC;
 
-  if (rcclPollaraNic) {
+  if (rcclAinic400) {
     if (!nccl_channel_ud_map[channel_id][channel_type].udAllocated) {
       bool lud = nccl_channel_last_ud[base->ibDevN][channel_type];
       nccl_channel_ud_map[channel_id][channel_type].udId = lud;
@@ -1321,9 +1333,9 @@ ncclResult_t ncclIbCreateQp(uint8_t ib_port, struct ncclIbNetCommDevBase* base,
 	      !(nccl_channel_last_ud[base->ibDevN][channel_type]);
     }
     if (nccl_channel_ud_map[channel_id][channel_type].udId) {
-        wrap_pollaradv_pd_set_udma_mask(base->pd, IONIC_UDMA_MASK_HIGH);
+        wrap_ainic400dv_pd_set_udma_mask(base->pd, IONIC_UDMA_MASK_HIGH);
     } else {
-        wrap_pollaradv_pd_set_udma_mask(base->pd, IONIC_UDMA_MASK_LOW);
+        wrap_ainic400dv_pd_set_udma_mask(base->pd, IONIC_UDMA_MASK_LOW);
     }
     qpInitAttr.sq_sig_all |= (1 << 16);
     if (data_qp) {
@@ -1348,11 +1360,11 @@ ncclResult_t ncclIbCreateQp(uint8_t ib_port, struct ncclIbNetCommDevBase* base,
   if (rcclCtsInlineData) {
     qpInitAttr.cap.max_inline_data = MAX_INLINE_DATA_SIZE;
   } else {
-    qpInitAttr.cap.max_inline_data = ncclParamIbUseInline() ? sizeof(struct ncclIbSendFifo) : 0;
-  } 
+    qpInitAttr.cap.max_inline_data = ncclIbUseInline ? sizeof(struct ncclIbSendFifo) : 0;
+  }
   NCCLCHECK(wrap_ibv_create_qp(&qp->qp, base->pd, &qpInitAttr));
-  if (rcclPollaraNic) {
-    NCCLCHECK(wrap_pollaradv_qp_set_gda(qp->qp, false, true));
+  if (rcclAinic400) {
+    NCCLCHECK(wrap_ainic400dv_qp_set_gda(qp->qp, false, true));
   }
   struct ibv_qp_attr qpAttr;
   memset(&qpAttr, 0, sizeof(struct ibv_qp_attr));
@@ -1363,7 +1375,7 @@ ncclResult_t ncclIbCreateQp(uint8_t ib_port, struct ncclIbNetCommDevBase* base,
   NCCLCHECK(wrap_ibv_modify_qp(qp->qp, &qpAttr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS));
   TRACE(NCCL_NET, "NET/IB : ncclIbCreateQp port=%d dev=%d devName=%s ndevs=%d nmdevs=%d qpn=%u pkey=%u pd=%p",
     ib_port, base->ibDevN, ncclIbDevs[base->ibDevN].devName, ncclNIbDevs, ncclNMergedIbDevs, qp->qp->qp_num, qpAttr.pkey_index, base->pd);
-  if (rcclPollaraNic) {
+  if (rcclAinic400) {
     qp->ctsQpSlot = cts_qp_slot;
   }
   return ncclSuccess;
@@ -1459,7 +1471,7 @@ ncclResult_t ncclIbConnect(int dev, ncclNetCommConfig_t* config, void* opaqueHan
   int channel_id = 0;
   *sendComm = NULL;
 
-  if (rcclPollaraNic) {
+  if (rcclAinic400) {
     channel_id = ((ncclNet_ctxt_t *)sendDevComm)->chId;
   }
 
@@ -1761,7 +1773,6 @@ ncclResult_t ncclIbCheckVProps(ncclNetVDeviceProps_t* vProps1, ncclNetVDevicePro
   return ncclSuccess;
 }
 
-NCCL_PARAM(IbGdrFlushDisable, "GDR_FLUSH_DISABLE", 0);
 RCCL_PARAM(IbGdrFlushGpuMemNoRelaxedOrdering, "GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING", 1);
 
 ncclResult_t ncclIbAccept(void* listenComm, void** recvComm, ncclNetDeviceHandle_t** recvDevComm) {
@@ -1774,7 +1785,7 @@ ncclResult_t ncclIbAccept(void* listenComm, void** recvComm, ncclNetDeviceHandle
   int channel_id = 0;
   *recvComm = NULL;
 
-  if (rcclPollaraNic) {
+  if (rcclAinic400) {
     channel_id = ((ncclNet_ctxt_t *) recvDevComm)->chId;
   }
 
@@ -1936,7 +1947,7 @@ ib_recv:
 
   useDmaBuf  = (ncclIbDmaBufSupport(lComm->dev) == ncclSuccess);
   rComm->flushEnabled = ((ncclIbGdrSupport() == ncclSuccess || useDmaBuf)
-                            && (ncclParamIbGdrFlushDisable() == 0)) ? 1 : 0;              
+                            && (ncclIbGdrFlushDisable == 0)) ? 1 : 0;              
   for (int i = 0; i < rComm->base.vProps.ndevs; i++) {
     rCommDev = rComm->devs + i;
     ibDev = ncclIbDevs + rCommDev->base.ibDevN;
@@ -1951,7 +1962,7 @@ ib_recv:
       NCCLCHECKGOTO(wrap_ibv_reg_mr(&rCommDev->fifoMr, rCommDev->base.pd, &rComm->remFifo.elems, sizeof(struct ncclIbSendFifo)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
     }
     rCommDev->fifoSge.lkey = rCommDev->fifoMr->lkey;
-    if (ncclParamIbUseInline()) rComm->remFifo.flags = IBV_SEND_INLINE;
+    if (ncclIbUseInline) rComm->remFifo.flags = IBV_SEND_INLINE;
 
     // Allocate Flush dummy buffer for GPU Direct RDMA
     if (rComm->flushEnabled) {
@@ -2373,7 +2384,7 @@ ncclResult_t ncclIbIsend(void* sendComm, void* data, size_t size, int tag, void*
 
   struct ncclIbMrHandle* mhandleWrapper = (struct ncclIbMrHandle*) mhandle;
   bool use_write_op = false;
-  if (rcclPollaraNic) {
+  if (rcclAinic400) {
       use_write_op = (*request == (void *)NCCL_NET_OPTIONAL_RECV_COMPLETION) ? true : false;
   }
 
@@ -2489,7 +2500,7 @@ ncclResult_t ncclIbPostFifo(struct ncclIbRecvComm* comm, int n, void** data, siz
     localElem = comm->remFifo.elems[slot];
   }
 
-  if (rcclPollaraNic) {
+  if (rcclAinic400) {
     qpIndex = comm->base.qpIndex;
     ctsQp = comm->base.qps + qpIndex;
   } else {
@@ -2569,7 +2580,7 @@ ncclResult_t ncclIbPostFifo(struct ncclIbRecvComm* comm, int n, void** data, siz
   //
   // slot == devIndex - When writing to fifo slot N, and this QP lives on device index N, it should send signalled.
   // This works out that each fifo posting QP gets drained
-  if (rcclPollaraNic) {
+  if (rcclAinic400) {
     if (slot == ctsQp->ctsQpSlot) {
       wr.send_flags |= IBV_SEND_SIGNALED;
       wr.wr_id = req - comm->base.reqs;
@@ -2590,7 +2601,7 @@ ncclResult_t ncclIbPostFifo(struct ncclIbRecvComm* comm, int n, void** data, siz
 
   comm->remFifo.fifoTail++;
 
-  if (rcclPollaraNic) {
+  if (rcclAinic400) {
     // Select the next qpIndex
     comm->base.qpIndex = (comm->base.qpIndex+1) % comm->base.nqps;
   }
@@ -2609,7 +2620,7 @@ ncclResult_t ncclIbIrecv(void* recvComm, int n, void** data, size_t* sizes, int*
   if (n > NCCL_NET_IB_MAX_RECVS) return ncclInternalError;
   NCCLCHECK(ncclIbStatsCheckFatalCount(&comm->base.stats,__func__));
 
-  if (rcclPollaraNic) {
+  if (rcclAinic400) {
     if (*request == (void *) NCCL_NET_OPTIONAL_RECV_COMPLETION) {
         netOptRecvCompletionEnabled = true;
     }
@@ -2663,7 +2674,7 @@ ncclResult_t ncclIbIrecv(void* recvComm, int n, void** data, size_t* sizes, int*
       NCCLCHECKGOTO(wrap_ibv_post_recv(qp->qp, &wr, &bad_wr), res, err);
       // Don't update comm->base.qpIndex yet, we need to run through this same set of QPs
       // inside ncclIbPostFifo()
-      if (rcclPollaraNic) {
+      if (rcclAinic400) {
         qpIndex = (qpIndex+1)%comm->base.nqps;
       } else {
         comm->base.qpIndex = (comm->base.qpIndex+1)%comm->base.nqps;
@@ -2790,7 +2801,7 @@ ncclResult_t ncclIbTest(void* request, int* done, int* sizes) {
     int wrDone = 0;
     struct ibv_wc wcs[NCCL_CQ_POLL_MAX_EVENT];
     int cqMaxPollEvent = 4;
-    if (rcclPollaraNic) {
+    if (rcclAinic400) {
         cqMaxPollEvent = NCCL_CQ_POLL_MAX_EVENT;
     }
 

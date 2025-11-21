@@ -553,9 +553,9 @@ set(SRC_FILES
   src/include/mlx5/mlx5dvcore.h
   src/include/mlx5/mlx5dvsymbols.h
   src/include/mlx5/mlx5dvwrap.h
-  src/include/pollara/pollaradvcore.h
-  src/include/pollara/pollaradvsymbols.h
-  src/include/pollara/pollaradvwrap.h
+  src/include/ainic400/ainic400dvcore.h
+  src/include/ainic400/ainic400dvsymbols.h
+  src/include/ainic400/ainic400dvwrap.h
   src/include/msccl/msccl_lifecycle.h
   src/include/msccl/msccl_parser.h
   src/include/msccl/msccl_scheduler.h
@@ -632,8 +632,8 @@ set(SRC_FILES
   src/misc/ipcsocket.cc
   src/misc/mlx5dvsymbols.cc
   src/misc/mlx5dvwrap.cc
-  src/misc/pollaradvsymbols.cc
-  src/misc/pollaradvwrap.cc
+  src/misc/ainic400dvsymbols.cc
+  src/misc/ainic400dvwrap.cc
   src/misc/npkit.cc
 # src/misc/nvmlwrap.cc
   src/misc/nvmlwrap_stub.cc
@@ -935,7 +935,7 @@ target_include_directories(rccl PRIVATE ${HIPIFY_DIR}/src/device)
 target_include_directories(rccl PRIVATE ${HIPIFY_DIR}/src/device/network/unpack)
 target_include_directories(rccl PRIVATE ${HIPIFY_DIR}/src/include)
 target_include_directories(rccl PRIVATE ${HIPIFY_DIR}/src/include/mlx5)
-target_include_directories(rccl PRIVATE ${HIPIFY_DIR}/src/include/pollara)
+target_include_directories(rccl PRIVATE ${HIPIFY_DIR}/src/include/ainic400)
 target_include_directories(rccl PRIVATE ${HIPIFY_DIR}/src/include/plugin)
 target_include_directories(rccl PRIVATE ${HIPIFY_DIR}/gensrc)
 target_include_directories(rccl PRIVATE ${HSA_INCLUDE_PATH})

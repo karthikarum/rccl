@@ -18,7 +18,6 @@ NVTX ?= 1
 RDMA_CORE ?= 0
 NET_PROFILER ?= 0
 MLX5DV ?= 0
-POLLARADV ?= 0
 MAX_EXT_NET_PLUGINS ?= 0
 
 NVCC = $(CUDA_HOME)/bin/nvcc
@@ -155,10 +154,6 @@ endif
 
 ifneq ($(MLX5DV), 0)
 CXXFLAGS += -DNCCL_BUILD_MLX5DV=1 -lmlx5
-endif
-
-ifneq ($(POLLARADV), 0)
-CXXFLAGS += -DNCCL_BUILD_POLLARADV=1 -lionic
 endif
 
 ifneq ($(NET_PROFILER), 0)
